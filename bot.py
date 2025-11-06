@@ -40,14 +40,21 @@ async def update_progress(update, prefix, downloaded, total, start_time):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "📜 *Available Commands:*\n"
-        "/add <link> - Add video link to queue\n"
-        "/list - Show current queue\n"
-        "/s or /startqueue - Start download queue\n"
-        "/clear - Clear queue\n"
-        "/status - Show current status\n"
-        "/cancel - Cancel current task\n"
-        "/help - Show this help message"
+        "🤖 *Welcome to the Smart Video Downloader Bot!*\n\n"
+        "Here’s what I can do for you 👇\n\n"
+        "🎬 /add `<link>` - Add a video link to the download queue\n"
+        "📦 /list - Show all queued videos\n"
+        "🚀 /s or /startqueue - Start downloading all queued videos\n"
+        "🗑️ /clear - Clear all queued links\n"
+        "⏳ /status - Show current task status\n"
+        "🛑 /cancel - Cancel the current download\n"
+        "📘 /help - Show this help message\n\n"
+        "⚡ *Bonus Features:*\n"
+        "- Live Download Progress (%)\n"
+        "- Speed (MB/s) + Estimated Time Remaining\n"
+        "- Auto Next Task After Completion\n"
+        "- Flask Keep-Alive (24×7 uptime on Render)\n\n"
+        "💡 *Tip:* You can queue multiple links using /add multiple times."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
