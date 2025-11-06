@@ -3,7 +3,8 @@ import asyncio
 import requests
 import yt_dlp
 import time
-from telegram import Update, ParseMode
+from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from flask import Flask
 from threading import Thread
@@ -16,7 +17,7 @@ if not BOT_TOKEN:
 else:
     print("✅ BOT_TOKEN loaded successfully!")
 
-# === Flask server (for uptime ping if deploying on Render) ===
+# === Flask server (for uptime ping) ===
 app = Flask(__name__)
 @app.route('/')
 def home():
@@ -53,18 +54,17 @@ async def download_file(update: Update, url: str):
     try:
         # --- YouTube or streaming ---
         if "youtube.com" in url or "youtu.be" in url:
-            ydl_opts = {
-                'format': 'best',
-                'outtmpl': '%(title)s.%(ext)s',
-            }
+            ydl_opts = {'format': 'best', 'outtmpl': '%(title)s.%(ext)s'}
             if rename_next_file:
                 ydl_opts['outtmpl'] = rename_next_file + ".%(ext)s"
+
             loop = asyncio.get_event_loop()
             def run_yt_dlp():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
             await loop.run_in_executor(None, run_yt_dlp)
-            filename = ydl_opts['outtmpl'].replace("%(ext)s","mp4") if rename_next_file else None
+
+            filename = ydl_opts['outtmpl'].replace("%(ext)s","mp4") if rename_next_file else "video.mp4"
 
         # --- Direct download link ---
         else:
@@ -78,7 +78,7 @@ async def download_file(update: Update, url: str):
             max_retries = 5
             for attempt in range(max_retries):
                 try:
-                    with requests.get(url, headers=headers, stream=True, timeout=30) as r:
+                    with requests.get(url, headers=headers, stream=True, timeout=(10, None)) as r:
                         r.raise_for_status()
                         total_length = int(r.headers.get('content-length',0))
                         downloaded = 0
@@ -115,8 +115,9 @@ async def download_file(update: Update, url: str):
             stats["size"] += file_size
             stats["total_speed"] += (file_size/1024/1024)/max(time.time()-start_time,0.1)
 
-        # --- Upload file ---
-        await update.message.reply_document(document=open(filename,'rb'), filename=filename)
+        # --- Upload file safely ---
+        with open(filename,'rb') as f:
+            await update.message.reply_document(document=f, filename=filename)
         os.remove(filename)
         await pinned_msg.edit_text(f"🎉 Upload complete: {filename}")
 
@@ -127,12 +128,14 @@ async def download_file(update: Update, url: str):
     finally:
         is_downloading = False
 
-# === Queue Processor ===
+# === Queue Processor (non-blocking) ===
 async def process_queue(update: Update):
     global is_downloading
-    while queue and is_downloading:
-        next_url = queue.pop(0)
-        await download_file(update, next_url)
+    while queue:
+        if not is_downloading:
+            next_url = queue.pop(0)
+            await download_file(update, next_url)
+        await asyncio.sleep(1)
 
 # === Bot Commands ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -140,7 +143,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "🤖 *Smart Downloader Bot — Commands*\n\n"
+        "🤖 *Downloader Bot — Commands*\n\n"
         "/add <link> — Add link to queue\n"
         "/s or /startqueue — Start download queue\n"
         "/list — Show queued links\n"
@@ -210,9 +213,7 @@ async def startqueue(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 No files in queue. Use /add <link>")
         return
     await update.message.reply_text(f"⏳ Starting download queue ({len(queue)} files)...")
-    while queue:
-        next_url = queue.pop(0)
-        await download_file(update, next_url)
+    asyncio.create_task(process_queue(update))
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime_seconds = (datetime.utcnow()-start_time_bot).total_seconds()
@@ -225,7 +226,7 @@ def main():
     Thread(target=run_flask).start()  # Start Flask server
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Command handlers
+    # Register commands
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("help", help_command))
     app_bot.add_handler(CommandHandler("add", add))
