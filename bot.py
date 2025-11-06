@@ -46,19 +46,23 @@ async def update_progress_message(message, prefix, downloaded, total, start_time
 
 # === Commands ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Bot is alive and running! 
-    "🤖 *Smart Downloader Bot — Commands*
-        "🎬 /add `<link>` — Add link(s) to queue
-        "🚀 /s or /startqueue — Start download queue
-        "📜 /list — Show queued links
-        "🗑️ /clear — Clear all queued links
-        "⏳ /status — Show current task
-        "🛑 /cancel — Cancel current download
-        "📊 /stats — Show session stats
-        "✏️ /rename `<new_name>` — Rename next file
-        "💓 /ping — Show bot uptime & ping
-        "📘 /help — Show this message
-")
+    start_text = """✅ Bot is alive and running!
+
+🤖 *Smart Downloader Bot — Commands*
+
+🎬 /add <link> — Add link(s) to queue
+🚀 /s or /startqueue — Start download queue
+📜 /list — Show queued links
+🗑️ /clear — Clear all queued links
+⏳ /status — Show current task
+🛑 /cancel — Cancel current download
+📊 /stats — Show session stats
+✏️ /rename <new_name> — Rename next file
+💓 /ping — Show bot uptime & ping
+📘 /help — Show this message
+"""
+    await update.message.reply_text(start_text, parse_mode=ParseMode.MARKDOWN)
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
