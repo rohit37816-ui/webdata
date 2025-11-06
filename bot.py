@@ -7,7 +7,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from flask import Flask
 from threading import Thread
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("7870355572:AAGVf8WkgkjvaYen_uqBSCT8TJCoihLbBXg")
 
 # --- Flask for Render Keep Alive ---
 app = Flask(__name__)
