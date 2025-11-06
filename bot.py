@@ -1,4 +1,4 @@
-import os
+iimport os
 import asyncio
 import requests
 import time
@@ -7,7 +7,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from flask import Flask
 from threading import Thread
 
-BOT_TOKEN = os.getenv("7870355572:AAFHWAP5oLdwPg10jx5IGkZz6H_lMonuJL8")
+# ✅ Correct way
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+print("DEBUG BOT_TOKEN:", BOT_TOKEN)
 
 # --- Flask for Render Keep Alive ---
 app = Flask(__name__)
