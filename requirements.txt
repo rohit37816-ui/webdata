@@ -1,14 +1,4 @@
-# Telegram bot framework
 python-telegram-bot==21.5
-
-# HTTP requests
 requests==2.31.0
-
-# Web server for Render uptime
-Flask==2.3.4
-
-# YouTube and streaming video downloader
-yt-dlp==2025.10.6
-
-# Optional: for async features if needed
-aiohttp==3.9.5
+Flask==2.3.3
+yt-dlp==2025.10.10
