@@ -3,7 +3,7 @@ import asyncio
 import requests
 import time
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 from flask import Flask
 from threading import Thread
@@ -168,13 +168,8 @@ async def download_file(update, url):
         stats["size"] += total_length
         stats["total_speed"] += (total_length / 1024 / 1024) / max(time.time() - start_time, 0.1)
 
-        # Upload file
-        if filename.lower().endswith(".mp4"):
-            await update.message.reply_video(video=open(filename, 'rb'))
-        elif filename.lower().endswith(".pdf"):
-            await update.message.reply_document(document=open(filename, 'rb'))
-        else:
-            await update.message.reply_document(document=open(filename, 'rb'))
+        # Upload file as original format
+        await update.message.reply_document(document=open(filename, 'rb'), filename=filename)
         os.remove(filename)
         await pinned_msg.unpin()
         await update.message.reply_text(f"🎉 Upload complete: {filename}")
