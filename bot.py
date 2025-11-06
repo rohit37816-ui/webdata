@@ -2,7 +2,6 @@ import os
 import asyncio
 import requests
 import time
-import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
@@ -18,7 +17,7 @@ if not BOT_TOKEN:
 else:
     print("✅ BOT_TOKEN loaded successfully!")
 
-# === Flask server (for uptime pings on Render) ===
+# === Flask server (keep alive) ===
 app = Flask(__name__)
 @app.route('/')
 def home():
@@ -34,7 +33,7 @@ rename_next_file = None
 stats = {"files": 0, "size": 0, "total_speed": 0}
 start_time_bot = datetime.utcnow()
 
-# === Helper: Progress update ===
+# === Progress helper ===
 async def update_progress_message(message, prefix, downloaded, total, start_time):
     elapsed = time.time() - start_time
     speed = downloaded / (1024*1024*elapsed + 0.0001)
@@ -46,35 +45,21 @@ async def update_progress_message(message, prefix, downloaded, total, start_time
 
 # === Commands ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    start_text = """✅ Bot is alive and running!
-
-🤖 *Smart Downloader Bot — Commands*
-
-🎬 /add <link> — Add link(s) to queue
-🚀 /s or /startqueue — Start download queue
-📜 /list — Show queued links
-🗑️ /clear — Clear all queued links
-⏳ /status — Show current task
-🛑 /cancel — Cancel current download
-📊 /stats — Show session stats
-✏️ /rename <new_name> — Rename next file
-💓 /ping — Show bot uptime & ping
-📘 /help — Show this message
-"""
-    await update.message.reply_text(start_text, parse_mode=ParseMode.MARKDOWN)
-
+    await update.message.reply_text(
+        "✅ Bot is alive and running!\nUse /help to see commands."
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 *Smart Downloader Bot — Commands*\n\n"
-        "🎬 /add `<link>` — Add link(s) to queue\n"
+        "🎬 /add <link> — Add link(s) to queue\n"
         "🚀 /s or /startqueue — Start download queue\n"
         "📜 /list — Show queued links\n"
         "🗑️ /clear — Clear all queued links\n"
         "⏳ /status — Show current task\n"
         "🛑 /cancel — Cancel current download\n"
         "📊 /stats — Show session stats\n"
-        "✏️ /rename `<new_name>` — Rename next file\n"
+        "✏️ /rename <new_name> — Rename next file\n"
         "💓 /ping — Show bot uptime & ping\n"
         "📘 /help — Show this message"
     )
@@ -89,7 +74,9 @@ async def add_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     for link in context.args:
         download_queue.append(link)
-    await update.message.reply_text(f"✅ Added {len(context.args)} link(s) to queue.\n📦 Total queued: {len(download_queue)}")
+    await update.message.reply_text(
+        f"✅ Added {len(context.args)} link(s) to queue.\n📦 Total queued: {len(download_queue)}"
+    )
 
 async def list_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not download_queue:
@@ -140,20 +127,20 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     minutes, seconds = divmod(remainder,60)
     await update.message.reply_text(f"💓 Bot uptime: {hours}h {minutes}m {seconds}s")
 
-# === File Download ===
+# === File download ===
 async def download_file(update, url):
     global is_downloading, rename_next_file, stats, current_task
     current_task = url
-    filename = None
     pinned_msg = await update.message.reply_text(f"🚀 Download started: {url}")
+    await pinned_msg.pin()
+    filename = None
 
     try:
-        # YouTube / streaming site detection
         if "youtube.com" in url or "youtu.be" in url:
+            # Use yt-dlp for YouTube links
             ydl_opts = {
                 'format': 'best',
                 'outtmpl': '%(title)s.%(ext)s',
-                'progress_hooks': []
             }
             if rename_next_file:
                 ydl_opts['outtmpl'] = rename_next_file + ".%(ext)s"
@@ -164,10 +151,11 @@ async def download_file(update, url):
             await loop.run_in_executor(None, run_yt_dlp)
             filename = ydl_opts['outtmpl'].replace("%(ext)s","mp4")
         else:
-            # Direct download link
+            # Direct download
             filename = url.split("/")[-1]
             if rename_next_file:
-                filename = rename_next_file
+                ext = filename.split('.')[-1] if '.' in filename else ''
+                filename = rename_next_file + ('.'+ext if ext else '')
                 rename_next_file = None
             with requests.get(url, stream=True, timeout=120) as r:
                 total_length = int(r.headers.get('content-length',0))
@@ -189,6 +177,7 @@ async def download_file(update, url):
             if filename and os.path.exists(filename):
                 os.remove(filename)
             await pinned_msg.edit_text("⚠️ Download canceled mid-way.")
+            await pinned_msg.unpin()
             return None
 
         # Update stats
@@ -198,7 +187,7 @@ async def download_file(update, url):
             stats["size"] += file_size
             stats["total_speed"] += (file_size/1024/1024)/max(time.time()-start_time,0.1)
 
-        # Upload original file
+        # Upload file
         await update.message.reply_document(document=open(filename,'rb'), filename=filename)
         os.remove(filename)
         await pinned_msg.unpin()
@@ -211,7 +200,7 @@ async def download_file(update, url):
         await pinned_msg.unpin()
         return None
 
-# === Queue Processor ===
+# === Queue processor ===
 async def start_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_downloading
     if is_downloading:
