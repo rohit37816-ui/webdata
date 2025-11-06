@@ -7,7 +7,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from flask import Flask
 from threading import Thread
 
-# ✅ Correct way
+# ✅ Correct way to load token from Render Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 print("DEBUG BOT_TOKEN:", BOT_TOKEN)
@@ -20,7 +20,29 @@ def home():
     return "✅ Bot is alive on Render!"
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8080)
+    app.run(host="0.0.0.0", port=8080)
+
+async def run_bot():
+    print("🤖 Starting Telegram bot...")
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    await app_bot.run_polling()
+
+
+    # Example /start command
+    async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("✅ Bot is alive and running!")
+
+    app_bot.add_handler(CommandHandler("start", start))
+
+    await app_bot.initialize()
+    await app_bot.start()
+    await app_bot.updater.start_polling()
+    print("✅ Bot connected successfully!")
+
+if __name__ == "__main__":
+    Thread(target=run_flask).start()  # Run Flask for uptime
+    asyncio.run(run_bot())            # Run Telegram bot
+
 
 # --- Globals ---
 download_queue = []
