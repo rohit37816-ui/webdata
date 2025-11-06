@@ -7,49 +7,30 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from flask import Flask
 from threading import Thread
 
-# ✅ Correct way to load token from Render Environment
+# === Load BOT TOKEN from Render Environment ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-print("DEBUG BOT_TOKEN:", BOT_TOKEN)
+if not BOT_TOKEN:
+    print("❌ ERROR: BOT_TOKEN not found in environment variables!")
+else:
+    print("✅ BOT_TOKEN loaded successfully!")
 
-# --- Flask for Render Keep Alive ---
+# === Flask server (for uptime pings on Render) ===
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Bot is alive on Render!"
+    return "✅ Bot is alive and Flask is running!"
 
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
-async def run_bot():
-    print("🤖 Starting Telegram bot...")
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
-    await app_bot.run_polling()
-
-
-    # Example /start command
-    async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("✅ Bot is alive and running!")
-
-    app_bot.add_handler(CommandHandler("start", start))
-
-    await app_bot.initialize()
-    await app_bot.start()
-    await app_bot.updater.start_polling()
-    print("✅ Bot connected successfully!")
-
-if __name__ == "__main__":
-    Thread(target=run_flask).start()  # Run Flask for uptime
-    asyncio.run(run_bot())            # Run Telegram bot
-
-
-# --- Globals ---
+# === Global Variables ===
 download_queue = []
 is_downloading = False
 current_task = None
 
-# --- Helper Function for Progress ---
+# === Helper: Progress display ===
 async def update_progress(update, prefix, downloaded, total, start_time):
     elapsed = time.time() - start_time
     speed = downloaded / (1024 * 1024 * elapsed + 0.0001)  # MB/s
@@ -61,25 +42,21 @@ async def update_progress(update, prefix, downloaded, total, start_time):
             f"⏳ ETA: {eta:.1f}s")
     await update.message.reply_text(text)
 
-# --- Commands ---
+# === Commands ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Bot is alive and running!")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 *Welcome to the Smart Video Downloader Bot!*\n\n"
-        "Here’s what I can do for you 👇\n\n"
-        "🎬 /add `<link>` - Add a video link to the download queue\n"
-        "📦 /list - Show all queued videos\n"
-        "🚀 /s or /startqueue - Start downloading all queued videos\n"
-        "🗑️ /clear - Clear all queued links\n"
-        "⏳ /status - Show current task status\n"
-        "🛑 /cancel - Cancel the current download\n"
-        "📘 /help - Show this help message\n\n"
-        "⚡ *Bonus Features:*\n"
-        "- Live Download Progress (%)\n"
-        "- Speed (MB/s) + Estimated Time Remaining\n"
-        "- Auto Next Task After Completion\n"
-        "- Flask Keep-Alive (24×7 uptime on Render)\n\n"
-        "💡 *Tip:* You can queue multiple links using /add multiple times."
+        "🎬 /add `<link>` - Add video link to queue\n"
+        "📦 /list - Show queued videos\n"
+        "🚀 /s or /startqueue - Start downloading\n"
+        "🗑️ /clear - Clear all links\n"
+        "⏳ /status - Show current status\n"
+        "🛑 /cancel - Cancel current download\n"
+        "📘 /help - Show this help\n\n"
+        "💡 Tip: Add multiple links using /add multiple times."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -116,7 +93,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("⚠️ No active task to cancel.")
 
-# --- Download with Progress ---
+# === File Download ===
 async def download_file(update, url):
     global is_downloading
 
@@ -136,7 +113,7 @@ async def download_file(update, url):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-                        if time.time() - start_time > 2:  # update every ~2 sec
+                        if time.time() - start_time > 2:
                             await update_progress(update, "⬇️ Downloading", downloaded, total_length, start_time)
                             start_time = time.time()
 
@@ -147,17 +124,16 @@ async def download_file(update, url):
 
         await update.message.reply_text("✅ Download complete, starting upload...")
 
-        # Upload progress simulation
+        # Fake upload progress
         file_size = os.path.getsize(filename)
         uploaded = 0
-        chunk = file_size / 10  # fake chunks for updates
+        chunk = file_size / 10
         for _ in range(10):
             await asyncio.sleep(1)
             uploaded += chunk
             percent = (uploaded / file_size) * 100
             await update.message.reply_text(f"📤 Uploading... {percent:.0f}%")
 
-        # Final upload to Telegram
         await update.message.reply_video(video=open(filename, 'rb'))
         os.remove(filename)
         await update.message.reply_text("✅ Upload completed!")
@@ -168,7 +144,7 @@ async def download_file(update, url):
             os.remove(filename)
         return None
 
-# --- Queue Handler ---
+# === Queue Processor ===
 async def start_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_downloading, current_task
 
@@ -191,11 +167,14 @@ async def start_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_downloading = False
     await update.message.reply_text("🏁 All tasks done or canceled!")
 
-# --- Main Function ---
+# === Main Entry Point ===
 def main():
-    Thread(target=run_flask).start()
+    Thread(target=run_flask).start()  # Run Flask keep-alive thread
+
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Register commands
+    app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("help", help_command))
     app_bot.add_handler(CommandHandler("add", add_link))
     app_bot.add_handler(CommandHandler("list", list_queue))
@@ -204,7 +183,7 @@ def main():
     app_bot.add_handler(CommandHandler("status", status))
     app_bot.add_handler(CommandHandler("cancel", cancel))
 
-    print("🤖 Bot is running with live speed + ETA tracking...")
+    print("🤖 Bot started successfully! Waiting for commands...")
     app_bot.run_polling()
 
 if __name__ == "__main__":
