@@ -1,11 +1,10 @@
 import os
 import asyncio
+import requests
+import yt_dlp
 import time
 import random
 import urllib.parse
-import aiohttp
-import aiofiles
-import yt_dlp
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -36,6 +35,10 @@ stats = {"files":0, "size":0, "total_speed":0}
 current_task = None
 start_time_bot = datetime.utcnow()
 
+# === Parallel download settings ===
+MAX_CONCURRENT_DOWNLOADS = 2  # Number of files to download at the same time
+download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+
 # === Helper: Progress message ===
 async def update_progress_message(message, prefix, downloaded, total, start_time):
     elapsed = time.time() - start_time
@@ -46,11 +49,10 @@ async def update_progress_message(message, prefix, downloaded, total, start_time
     text = f"{prefix} {percent:.2f}%\n⚡ Speed: {speed:.2f} MB/s\n⏳ ETA: {eta:.1f}s"
     await message.edit_text(text)
 
-# === Helper: extract real URL and filename ===
+# === Helper: extract real URL and filename from ?play= links ===
 def extract_real_url_and_title(url: str):
     parsed = urllib.parse.urlparse(url)
     params = urllib.parse.parse_qs(parsed.query)
-    
     real_url = params.get("play", [url])[0]
     title = params.get("title", [real_url.split('/')[-1]])[0]
     # Replace illegal filename characters
@@ -60,9 +62,9 @@ def extract_real_url_and_title(url: str):
     filename = f"{title}.{ext}"
     return real_url, filename
 
-# === Download function ===
+# === Download function with human-like behavior ===
 async def download_file(update: Update, item):
-    global is_downloading, stats, current_task
+    global is_downloading, stats, current_task, rename_next_file
     real_url, filename = item
     current_task = filename
     is_downloading = True
@@ -89,45 +91,44 @@ async def download_file(update: Update, item):
                 rename_next_file = None
 
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) "
-                              "Chrome/121.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "identity",
-                "Connection": "keep-alive"
+                "User-Agent": random.choice([
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 "
+                    "(KHTML, like Gecko) Version/16.6 Safari/605.1.15"
+                ])
             }
-
             max_retries = 5
             for attempt in range(max_retries):
                 try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(real_url, headers=headers) as r:
-                            r.raise_for_status()
-                            total_length = int(r.headers.get('Content-Length',0))
-                            downloaded = 0
-                            start_time = time.time()
-                            async with aiofiles.open(filename, 'wb') as f:
-                                async for chunk in r.content.iter_chunked(64*1024):
-                                    if not is_downloading:
-                                        raise Exception("Download canceled")
-                                    if chunk:
-                                        await f.write(chunk)
-                                        downloaded += len(chunk)
-                                        if time.time()-start_time > 1:
-                                            await update_progress_message(pinned_msg,"⬇️ Downloading",downloaded,total_length,start_time)
-                                            start_time = time.time()
-                                        await asyncio.sleep(0.01)
+                    with requests.get(real_url, headers=headers, stream=True, timeout=(10, None)) as r:
+                        r.raise_for_status()
+                        total_length = int(r.headers.get('Content-Length',0))
+                        downloaded = 0
+                        chunk_size = 1024*1024
+                        start_time = time.time()
+                        with open(filename,'wb') as f:
+                            for chunk in r.iter_content(chunk_size=chunk_size):
+                                if not is_downloading:
+                                    raise Exception("Download canceled")
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if time.time()-start_time > 1:
+                                        await update_progress_message(pinned_msg,"⬇️ Downloading",downloaded,total_length,start_time)
+                                        start_time = time.time()
+                                    # ← Human-like small delay
+                                    await asyncio.sleep(random.uniform(0.1,0.3))
                     break
                 except Exception as e:
                     if attempt < max_retries-1:
                         await pinned_msg.edit_text(f"⚠️ Retry {attempt+1}/{max_retries} due to error: {e}")
-                        await asyncio.sleep(random.randint(2,5))
+                        await asyncio.sleep(2 + random.random()*1)
                     else:
                         raise e
 
         if not is_downloading:
-            if filename and os.path.exists(filename):
+            if os.path.exists(filename):
                 os.remove(filename)
             await pinned_msg.edit_text("⚠️ Download canceled mid-way.")
             return
@@ -140,26 +141,40 @@ async def download_file(update: Update, item):
             stats["total_speed"] += (file_size/1024/1024)/max(time.time()-start_time,0.1)
 
         # --- Upload ---
-        async with aiofiles.open(filename, 'rb') as f:
+        with open(filename, 'rb') as f:
             await update.message.reply_document(document=f, filename=filename)
         os.remove(filename)
         await pinned_msg.edit_text(f"🎉 Upload complete: {filename}")
 
     except Exception as e:
         await pinned_msg.edit_text(f"❌ Error: {e}")
-        if filename and os.path.exists(filename):
+        if os.path.exists(filename):
             os.remove(filename)
     finally:
         is_downloading = False
 
-# === Queue processor ===
+# === Safe download wrapper for semaphore ===
+async def safe_download(update, item):
+    async with download_semaphore:
+        await download_file(update, item)
+        # Small human-like delay after finishing a file
+        await asyncio.sleep(random.uniform(1,3))
+
+# === Parallel queue processor ===
 async def process_queue(update: Update):
-    global is_downloading
+    tasks = []
     while queue:
-        if not is_downloading:
+        # Schedule downloads while respecting concurrency
+        while queue and len(tasks) < MAX_CONCURRENT_DOWNLOADS:
             next_item = queue.pop(0)
-            await download_file(update, next_item)
-        await asyncio.sleep(1)
+            task = asyncio.create_task(safe_download(update, next_item))
+            tasks.append(task)
+        # Wait for at least one task to complete
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        # Remove completed tasks from the list
+        tasks = list(pending)
+        # Slight delay before scheduling next batch
+        await asyncio.sleep(0.5)
 
 # === Bot commands ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -185,12 +200,10 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Usage: /add <link>")
         return
-    added_count = 0
     for link in context.args:
         real_url, filename = extract_real_url_and_title(link)
         queue.append((real_url, filename))
-        added_count += 1
-    await update.message.reply_text(f"✅ Added {added_count} link(s). Queue size: {len(queue)}")
+    await update.message.reply_text(f"✅ Added {len(context.args)} link(s). Queue size: {len(queue)}")
 
 async def list_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not queue:
@@ -250,7 +263,7 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === Main ===
 def main():
-    Thread(target=run_flask).start()  # Start Flask server
+    Thread(target=run_flask).start()
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Register commands
