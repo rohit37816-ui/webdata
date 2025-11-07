@@ -11,7 +11,7 @@ from threading import Thread
 from datetime import datetime
 import re
 
-# === BOT VERSION ===
+# === Bot Version ===
 BOT_VERSION = "v0.1"
 
 # === Load BOT TOKEN ===
@@ -35,6 +35,7 @@ current_task = None
 start_time_bot = datetime.utcnow()
 SPINNER = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 URL_REGEX = re.compile(r'https?://[^\s]+')
+queue = []
 
 # === Helpers ===
 def parse_direct_link(url):
@@ -100,15 +101,28 @@ async def download_video(update: Update, url: str, filename: str):
         is_downloading = False
         current_task = None
 
+# === Queue Processor ===
+async def process_queue(update: Update):
+    while queue:
+        if not is_downloading:
+            url = queue.pop(0)
+            real_url, title = parse_direct_link(url)
+            filename = f"{title}.mp4"
+            await download_video(update, real_url, filename)
+        await asyncio.sleep(1)
+
 # === Handlers ===
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    text = update.message.text or update.message.caption
+    if not text:
+        return
     urls = URL_REGEX.findall(text)
     if not urls:
         return
     for url in urls:
         real_url, title = parse_direct_link(url)
-        keyboard = [[InlineKeyboardButton("Download MP4", callback_data=real_url)]]
+        queue.append(url)
+        keyboard = [[InlineKeyboardButton("Download MP4", callback_data=url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
             f"Select the desired format👇\n"
@@ -121,9 +135,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     url = query.data
-    _, title = parse_direct_link(url)
+    real_url, title = parse_direct_link(url)
     filename = f"{title}.mp4"
-    await download_video(update, url, filename)
+    await download_video(update, real_url, filename)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Bot {BOT_VERSION} is alive! Send a video link to start downloading.")
