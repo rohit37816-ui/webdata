@@ -1,15 +1,15 @@
 import os
 import asyncio
 import requests
-import yt_dlp
 import time
 from urllib.parse import urlparse, parse_qs, unquote
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler, filters
 from flask import Flask
 from threading import Thread
 from datetime import datetime
+import re
 
 # === BOT VERSION ===
 BOT_VERSION = "v0.1"
@@ -17,11 +17,11 @@ BOT_VERSION = "v0.1"
 # === Load BOT TOKEN ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    print("❌ BOT_TOKEN not found in environment variables!")
+    print("❌ BOT_TOKEN not found!")
 else:
-    print(f"✅ BOT_TOKEN loaded successfully! Bot version: {BOT_VERSION}")
+    print(f"✅ BOT_TOKEN loaded! Bot version: {BOT_VERSION}")
 
-# === Flask server for uptime ping ===
+# === Flask server for uptime ===
 app = Flask(__name__)
 @app.route('/')
 def home():
@@ -30,23 +30,24 @@ def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
 # === Globals ===
-queue = []
 is_downloading = False
 current_task = None
 start_time_bot = datetime.utcnow()
-
-# === Helper: Parse real video URL and title ===
-def parse_direct_link(url):
-    parsed = urlparse(url)
-    qs = parse_qs(parsed.query)
-    real_url = unquote(qs.get("play", [url])[0])
-    title = qs.get("title", ["video"])[0].replace("+"," ").strip()
-    if not title:
-        title = "video"
-    return real_url, title
-
-# === Helper: Progress spinner ===
 SPINNER = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+URL_REGEX = re.compile(r'https?://[^\s]+')
+
+# === Helpers ===
+def parse_direct_link(url):
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        real_url = unquote(qs.get("play", [url])[0])
+        title = qs.get("title", ["video"])[0].replace("+"," ").strip()
+        if not title:
+            title = "video"
+        return real_url, title
+    except Exception:
+        return url, "video"
 
 async def progress_animation(message, prefix, downloaded, total, start_time, spinner_index=0):
     percent = (downloaded/total)*100 if total>0 else 0
@@ -69,7 +70,6 @@ async def download_video(update: Update, url: str, filename: str):
     is_downloading = True
     pinned_msg = await update.message.reply_text(f"🚀 Download started: {filename}")
     spinner_index = 0
-
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         with requests.get(url, headers=headers, stream=True, timeout=(10,None)) as r:
@@ -87,14 +87,11 @@ async def download_video(update: Update, url: str, filename: str):
                             await progress_animation(pinned_msg,"⬇️ Downloading",downloaded,total_length,start_time, spinner_index)
                             spinner_index += 1
                             start_time = time.time()
-
         await pinned_msg.edit_text(f"⬆️ Download finished. Uploading: {filename} ...")
-        # Upload
         with open(filename,'rb') as f:
             await update.message.reply_document(document=InputFile(f, filename=filename))
         os.remove(filename)
         await pinned_msg.edit_text(f"🎉 Upload complete: {filename}")
-
     except Exception as e:
         await pinned_msg.edit_text(f"❌ Error: {e}")
         if os.path.exists(filename):
@@ -103,23 +100,23 @@ async def download_video(update: Update, url: str, filename: str):
         is_downloading = False
         current_task = None
 
-# === Handler for direct links ===
+# === Handlers ===
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if "http" not in text:
+    urls = URL_REGEX.findall(text)
+    if not urls:
         return
+    for url in urls:
+        real_url, title = parse_direct_link(url)
+        keyboard = [[InlineKeyboardButton("Download MP4", callback_data=real_url)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"Select the desired format👇\n"
+            f"ғɪʟᴇɴᴀᴍᴇ: {title}\n"
+            f"Tap to copy ☝️ Filename",
+            reply_markup=reply_markup
+        )
 
-    real_url, title = parse_direct_link(text)
-    keyboard = [[InlineKeyboardButton("Download MP4", callback_data=real_url)]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        f"Select the desired format👇\n"
-        f"ғɪʟᴇɴᴀᴍᴇ: {title}\n"
-        f"Tap to copy ☝️ Filename",
-        reply_markup=reply_markup
-    )
-
-# === Button callback ===
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -128,7 +125,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filename = f"{title}.mp4"
     await download_video(update, url, filename)
 
-# === Commands ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Bot {BOT_VERSION} is alive! Send a video link to start downloading.")
 
@@ -137,6 +133,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 *Downloader Bot {BOT_VERSION} — Commands*\n\n"
         "/start — Start bot\n"
         "/help — Show this help\n"
+        "/ping — Show uptime\n\n"
         "Send any direct link to get interactive download buttons.\n"
         "Bot automatically fetches video title and downloads original MP4."
     )
@@ -148,7 +145,7 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     minutes, seconds = divmod(remainder,60)
     await update.message.reply_text(f"💓 Bot uptime: {hours}h {minutes}m {seconds}s")
 
-# === Main function ===
+# === Main ===
 def main():
     Thread(target=run_flask).start()
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -157,9 +154,9 @@ def main():
     app_bot.add_handler(CommandHandler("help", help_command))
     app_bot.add_handler(CommandHandler("ping", ping))
 
-    # Catch all messages containing a link
-    app_bot.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_link))
-    # Button presses
+    # Catch any message containing a URL
+    app_bot.add_handler(MessageHandler(filters.Regex(URL_REGEX), handle_link))
+    # Button callback
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
     print(f"🤖 Bot {BOT_VERSION} started successfully!")
