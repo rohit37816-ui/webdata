@@ -1,8 +1,11 @@
 import os
 import asyncio
-import requests
-import yt_dlp
 import time
+import random
+import urllib.parse
+import aiohttp
+import aiofiles
+import yt_dlp
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -43,62 +46,83 @@ async def update_progress_message(message, prefix, downloaded, total, start_time
     text = f"{prefix} {percent:.2f}%\n⚡ Speed: {speed:.2f} MB/s\n⏳ ETA: {eta:.1f}s"
     await message.edit_text(text)
 
+# === Helper: extract real URL and filename ===
+def extract_real_url_and_title(url: str):
+    parsed = urllib.parse.urlparse(url)
+    params = urllib.parse.parse_qs(parsed.query)
+    
+    real_url = params.get("play", [url])[0]
+    title = params.get("title", [real_url.split('/')[-1]])[0]
+    # Replace illegal filename characters
+    for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|']:
+        title = title.replace(ch, "_")
+    ext = real_url.split('.')[-1] if '.' in real_url else 'mp4'
+    filename = f"{title}.{ext}"
+    return real_url, filename
+
 # === Download function ===
-async def download_file(update: Update, url: str):
-    global is_downloading, rename_next_file, stats, current_task
-    current_task = url
+async def download_file(update: Update, item):
+    global is_downloading, stats, current_task
+    real_url, filename = item
+    current_task = filename
     is_downloading = True
-    filename = None
-    pinned_msg = await update.message.reply_text(f"🚀 Download started: {url}")
+    pinned_msg = await update.message.reply_text(f"🚀 Download started: {filename}")
 
     try:
-        # --- YouTube or streaming ---
-        if "youtube.com" in url or "youtu.be" in url:
+        # --- YouTube download ---
+        if "youtube.com" in real_url or "youtu.be" in real_url:
             ydl_opts = {'format': 'best', 'outtmpl': '%(title)s.%(ext)s'}
             if rename_next_file:
                 ydl_opts['outtmpl'] = rename_next_file + ".%(ext)s"
-
             loop = asyncio.get_event_loop()
             def run_yt_dlp():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
+                    ydl.download([real_url])
             await loop.run_in_executor(None, run_yt_dlp)
-
             filename = ydl_opts['outtmpl'].replace("%(ext)s","mp4") if rename_next_file else "video.mp4"
 
-        # --- Direct download link ---
+        # --- Direct download / web link ---
         else:
-            filename = url.split("/")[-1]
             if rename_next_file:
-                ext = filename.split(".")[-1] if "." in filename else ""
-                filename = f"{rename_next_file}.{ext}" if ext else rename_next_file
+                ext = real_url.split('.')[-1] if '.' in real_url else 'mp4'
+                filename = f"{rename_next_file}.{ext}"
                 rename_next_file = None
 
-            headers = {"User-Agent": "Mozilla/5.0"}
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/121.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "identity",
+                "Connection": "keep-alive"
+            }
+
             max_retries = 5
             for attempt in range(max_retries):
                 try:
-                    with requests.get(url, headers=headers, stream=True, timeout=(10, None)) as r:
-                        r.raise_for_status()
-                        total_length = int(r.headers.get('content-length',0))
-                        downloaded = 0
-                        chunk_size = 1024*1024
-                        start_time = time.time()
-                        with open(filename,'wb') as f:
-                            for chunk in r.iter_content(chunk_size=chunk_size):
-                                if not is_downloading:
-                                    raise Exception("Download canceled")
-                                if chunk:
-                                    f.write(chunk)
-                                    downloaded += len(chunk)
-                                    if time.time()-start_time>1:
-                                        await update_progress_message(pinned_msg,"⬇️ Downloading",downloaded,total_length,start_time)
-                                        start_time = time.time()
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(real_url, headers=headers) as r:
+                            r.raise_for_status()
+                            total_length = int(r.headers.get('Content-Length',0))
+                            downloaded = 0
+                            start_time = time.time()
+                            async with aiofiles.open(filename, 'wb') as f:
+                                async for chunk in r.content.iter_chunked(64*1024):
+                                    if not is_downloading:
+                                        raise Exception("Download canceled")
+                                    if chunk:
+                                        await f.write(chunk)
+                                        downloaded += len(chunk)
+                                        if time.time()-start_time > 1:
+                                            await update_progress_message(pinned_msg,"⬇️ Downloading",downloaded,total_length,start_time)
+                                            start_time = time.time()
+                                        await asyncio.sleep(0.01)
                     break
-                except requests.exceptions.RequestException as e:
+                except Exception as e:
                     if attempt < max_retries-1:
-                        await pinned_msg.edit_text(f"⚠️ Retry {attempt+1}/{max_retries} after error: {e}")
-                        await asyncio.sleep(2)
+                        await pinned_msg.edit_text(f"⚠️ Retry {attempt+1}/{max_retries} due to error: {e}")
+                        await asyncio.sleep(random.randint(2,5))
                     else:
                         raise e
 
@@ -115,8 +139,8 @@ async def download_file(update: Update, url: str):
             stats["size"] += file_size
             stats["total_speed"] += (file_size/1024/1024)/max(time.time()-start_time,0.1)
 
-        # --- Upload file safely ---
-        with open(filename,'rb') as f:
+        # --- Upload ---
+        async with aiofiles.open(filename, 'rb') as f:
             await update.message.reply_document(document=f, filename=filename)
         os.remove(filename)
         await pinned_msg.edit_text(f"🎉 Upload complete: {filename}")
@@ -128,23 +152,23 @@ async def download_file(update: Update, url: str):
     finally:
         is_downloading = False
 
-# === Queue Processor (non-blocking) ===
+# === Queue processor ===
 async def process_queue(update: Update):
     global is_downloading
     while queue:
         if not is_downloading:
-            next_url = queue.pop(0)
-            await download_file(update, next_url)
+            next_item = queue.pop(0)
+            await download_file(update, next_item)
         await asyncio.sleep(1)
 
-# === Bot Commands ===
+# === Bot commands ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Bot is alive! Use /help for commands.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 *Downloader Bot — Commands*\n\n"
-        "/add <link> — Add link to queue\n"
+        "/add <link> — Add link(s) to queue\n"
         "/s or /startqueue — Start download queue\n"
         "/list — Show queued links\n"
         "/clear — Clear queue\n"
@@ -161,15 +185,18 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Usage: /add <link>")
         return
+    added_count = 0
     for link in context.args:
-        queue.append(link)
-    await update.message.reply_text(f"✅ Added {len(context.args)} link(s). Queue size: {len(queue)}")
+        real_url, filename = extract_real_url_and_title(link)
+        queue.append((real_url, filename))
+        added_count += 1
+    await update.message.reply_text(f"✅ Added {added_count} link(s). Queue size: {len(queue)}")
 
 async def list_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not queue:
         await update.message.reply_text("📭 Queue is empty.")
     else:
-        text = "\n".join([f"{i+1}. {url}" for i,url in enumerate(queue)])
+        text = "\n".join([f"{i+1}. {item[1]}" for i,item in enumerate(queue)])
         await update.message.reply_text(f"📦 *Download Queue:*\n{text}", parse_mode=ParseMode.MARKDOWN)
 
 async def clear_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
