@@ -2,15 +2,15 @@ import os
 import asyncio
 import requests
 import time
+from urllib.parse import urlparse, parse_qs, unquote
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from flask import Flask
 from threading import Thread
 from datetime import datetime
-from urllib.parse import urlparse, unquote
 
-# === Bot version ===
+# === Bot Version ===
 BOT_VERSION = "0.1"
 
 # === Load BOT TOKEN from Environment ===
@@ -24,7 +24,8 @@ else:
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return f"✅ Bot is alive and running! Version: {BOT_VERSION}"
+    return "✅ Bot is alive and running!"
+
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
@@ -35,54 +36,52 @@ rename_next_file = None
 stats = {"files":0, "size":0, "total_speed":0}
 current_task = None
 start_time_bot = datetime.utcnow()
-spinner_cycle = ["|", "/", "-", "\\"]
+spinner_chars = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
 
-# === Helper: Progress message with spinner ===
+# === Helper: Extract real video and title ===
+def extract_real_video(url):
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    play_url = qs.get("play", [url])[0]
+    title = qs.get("title", [None])[0]
+    if title:
+        title = unquote(title)
+    else:
+        title = os.path.basename(urlparse(play_url).path)
+    return play_url, title
+
+# === Helper: Progress message ===
 async def update_progress_message(message, downloaded_mb, total_mb, speed, eta, spinner_index):
-    text = (
-        f"⬇️ Downloading {spinner_cycle[spinner_index % len(spinner_cycle)]}\n"
-        f"Downloaded: {downloaded_mb:.2f} MB / {total_mb:.2f} MB\n"
-        f"⚡ Speed: {speed:.2f} MB/s\n"
-        f"⏳ ETA: {eta:.1f}s"
-    )
+    spinner = spinner_chars[spinner_index % len(spinner_chars)]
+    text = f"{spinner} Downloading: {downloaded_mb:.2f}/{total_mb:.2f} MB\n⚡ Speed: {speed:.2f} MB/s\n⏳ ETA: {eta:.1f}s"
     await message.edit_text(text)
 
-# === Helper: Extract title & extension from URL ===
-def extract_title_and_ext(url):
-    parsed = urlparse(url)
-    filename = os.path.basename(parsed.path)
-    filename = unquote(filename)
-    if "." in filename:
-        name, ext = filename.rsplit(".", 1)
-        return name, ext
-    return filename, "mp4"
-
-# === Download function (memory safe) ===
+# === Download function ===
 async def download_file(update: Update, url: str):
     global is_downloading, rename_next_file, stats, current_task
     current_task = url
     is_downloading = True
 
-    # Prepare filename
-    name, ext = extract_title_and_ext(url)
+    # Extract real video and title
+    play_url, title = extract_real_video(url)
     if rename_next_file:
-        filename = f"{rename_next_file}.{ext}"
+        filename = f"{rename_next_file}.mp4"
         rename_next_file = None
     else:
-        filename = f"{name}.{ext}"
+        filename = f"{title}.mp4"
 
-    pinned_msg = await update.message.reply_text(f"🚀 Download started: {url}")
+    pinned_msg = await update.message.reply_text(f"🚀 Download started: {title}")
 
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         max_retries = 5
         for attempt in range(max_retries):
             try:
-                with requests.get(url, headers=headers, stream=True, timeout=(10, None)) as r:
+                with requests.get(play_url, headers=headers, stream=True, timeout=(10, None)) as r:
                     r.raise_for_status()
                     total_length = int(r.headers.get("content-length", 0))
                     downloaded = 0
-                    chunk_size = 1024*1024  # 1MB
+                    chunk_size = 1024*1024  # 1 MB
                     spinner_index = 0
                     start_time = time.time()
                     with open(filename, "wb") as f:
@@ -127,7 +126,7 @@ async def download_file(update: Update, url: str):
             stats["size"] += file_size
             stats["total_speed"] += (file_size/1024/1024)/max(time.time()-start_time,0.1)
 
-        # --- Upload file safely ---
+        # Upload file
         await pinned_msg.edit_text("⬆️ Uploading file...")
         with open(filename, "rb") as f:
             await update.message.reply_document(
@@ -155,11 +154,11 @@ async def process_queue(update: Update):
 
 # === Bot Commands ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"✅ Bot is alive! Version: {BOT_VERSION}\nUse /help for commands.")
+    await update.message.reply_text(f"✅ Bot v{BOT_VERSION} is alive! Use /help for commands.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        f"🤖 *Downloader Bot v{BOT_VERSION} — Commands*\n\n"
+        f"🤖 *Downloader Bot — v{BOT_VERSION} Commands*\n\n"
         "/add <link> — Add link to queue\n"
         "/s or /startqueue — Start download queue\n"
         "/list — Show queued links\n"
@@ -168,7 +167,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancel — Cancel current download\n"
         "/stats — Show session stats\n"
         "/rename <new_name> — Rename next file\n"
-        "/restartvote — Clear queue and reset bot\n"
         "/ping — Show uptime\n"
         "/help — Show this message"
     )
@@ -192,13 +190,6 @@ async def list_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     queue.clear()
     await update.message.reply_text("🗑️ Queue cleared!")
-
-async def restart_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global queue, is_downloading, current_task
-    queue.clear()
-    is_downloading = False
-    current_task = None
-    await update.message.reply_text("🔄 Vote reset. Queue cleared and bot ready!")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_downloading:
@@ -257,7 +248,6 @@ def main():
     app_bot.add_handler(CommandHandler("list", list_queue))
     app_bot.add_handler(CommandHandler(["s","startqueue"], startqueue))
     app_bot.add_handler(CommandHandler("clear", clear_queue))
-    app_bot.add_handler(CommandHandler("restartvote", restart_vote))
     app_bot.add_handler(CommandHandler("status", status))
     app_bot.add_handler(CommandHandler("cancel", cancel))
     app_bot.add_handler(CommandHandler("stats", stats_command))
