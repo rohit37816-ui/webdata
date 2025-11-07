@@ -2,10 +2,10 @@ import os
 import asyncio
 import requests
 import time
-from urllib.parse import urlparse, parse_qs, unquote
+import re
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 from flask import Flask
 from threading import Thread
 from datetime import datetime
@@ -25,7 +25,6 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     return "✅ Bot is alive and running!"
-
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
@@ -36,74 +35,93 @@ rename_next_file = None
 stats = {"files":0, "size":0, "total_speed":0}
 current_task = None
 start_time_bot = datetime.utcnow()
-spinner_chars = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+batch_waiting_for_link = False
 
-# === Helper: Extract real video and title ===
-def extract_real_video(url):
-    parsed = urlparse(url)
-    qs = parse_qs(parsed.query)
-    play_url = qs.get("play", [url])[0]
-    title = qs.get("title", [None])[0]
-    if title:
-        title = unquote(title)
-    else:
-        title = os.path.basename(urlparse(play_url).path)
-    return play_url, title
+spinner_frames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 
-# === Helper: Progress message ===
-async def update_progress_message(message, downloaded_mb, total_mb, speed, eta, spinner_index):
-    spinner = spinner_chars[spinner_index % len(spinner_chars)]
-    text = f"{spinner} Downloading: {downloaded_mb:.2f}/{total_mb:.2f} MB\n⚡ Speed: {speed:.2f} MB/s\n⏳ ETA: {eta:.1f}s"
+def sanitize_filename(name):
+    return re.sub(r'[\\/*?:"<>|]', "_", name)
+
+# === Download progress helper ===
+async def update_progress_message(message, prefix, downloaded, total, start_time):
+    elapsed = time.time() - start_time
+    speed = downloaded / (1024*1024*elapsed + 0.0001)
+    percent = (downloaded/total)*100 if total>0 else 0
+    remaining = total - downloaded
+    eta = remaining / (1024*1024*speed + 0.0001)
+    spinner = spinner_frames[int(time.time()*4) % len(spinner_frames)]
+    text = (f"{spinner} {prefix} {percent:.2f}%\n"
+            f"⬇️ Downloaded: {downloaded/1024/1024:.2f}/{total/1024/1024:.2f} MB\n"
+            f"⚡ Speed: {speed:.2f} MB/s\n⏳ ETA: {eta:.1f}s")
     await message.edit_text(text)
+
+# === Upload helper with progress ===
+async def upload_file_with_progress(update: Update, file_path: str, filename: str):
+    total_size = os.path.getsize(file_path)
+    uploaded = 0
+    chunk_size = 1024*1024
+    spinner_index = 0
+    pinned_msg = await update.message.reply_text(f"⬆️ Uploading {filename}...")
+
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            uploaded += len(chunk)
+            spinner_index = (spinner_index + 1) % len(spinner_frames)
+            spinner = spinner_frames[spinner_index]
+            percent = (uploaded/total_size)*100
+            text = (f"{spinner} ⬆️ Uploading {filename}\n"
+                    f"📤 {uploaded/1024/1024:.2f}/{total_size/1024/1024:.2f} MB\n"
+                    f"📈 {percent:.2f}%")
+            await pinned_msg.edit_text(text)
+    # Actually send the file
+    with open(file_path, "rb") as f:
+        await update.message.reply_document(document=f, filename=filename)
+    await pinned_msg.edit_text(f"🎉 Upload complete: {filename}")
 
 # === Download function ===
 async def download_file(update: Update, url: str):
     global is_downloading, rename_next_file, stats, current_task
     current_task = url
     is_downloading = True
-
-    # Extract real video and title
-    play_url, title = extract_real_video(url)
-    if rename_next_file:
-        filename = f"{rename_next_file}.mp4"
-        rename_next_file = None
-    else:
-        filename = f"{title}.mp4"
-
-    pinned_msg = await update.message.reply_text(f"🚀 Download started: {title}")
+    filename = None
+    pinned_msg = await update.message.reply_text(f"🚀 Download started: {url}")
 
     try:
+        # Extract title from URL if exists
+        title = None
+        if "title=" in url:
+            title = url.split("title=")[-1]
+            title = sanitize_filename(title.replace("+"," ").strip())
+        else:
+            title = "video"
+
+        filename = title + ".mp4"
+        if rename_next_file:
+            filename = sanitize_filename(rename_next_file) + ".mp4"
+            rename_next_file = None
+
         headers = {"User-Agent": "Mozilla/5.0"}
         max_retries = 5
         for attempt in range(max_retries):
             try:
-                with requests.get(play_url, headers=headers, stream=True, timeout=(10, None)) as r:
+                with requests.get(url, headers=headers, stream=True, timeout=(10, None)) as r:
                     r.raise_for_status()
-                    total_length = int(r.headers.get("content-length", 0))
+                    total_length = int(r.headers.get('content-length',0))
                     downloaded = 0
-                    chunk_size = 1024*1024  # 1 MB
-                    spinner_index = 0
+                    chunk_size = 1024*1024
                     start_time = time.time()
-                    with open(filename, "wb") as f:
+                    with open(filename,'wb') as f:
                         for chunk in r.iter_content(chunk_size=chunk_size):
                             if not is_downloading:
                                 raise Exception("Download canceled")
                             if chunk:
                                 f.write(chunk)
                                 downloaded += len(chunk)
-                                elapsed = time.time() - start_time
-                                if elapsed > 1:
-                                    speed = (downloaded / 1024 / 1024) / elapsed
-                                    eta = (total_length - downloaded) / 1024 / 1024 / max(speed, 0.001)
-                                    await update_progress_message(
-                                        pinned_msg,
-                                        downloaded/1024/1024,
-                                        total_length/1024/1024,
-                                        speed,
-                                        eta,
-                                        spinner_index
-                                    )
-                                    spinner_index += 1
+                                if time.time()-start_time>0.5:
+                                    await update_progress_message(pinned_msg,"⬇️ Downloading",downloaded,total_length,start_time)
                                     start_time = time.time()
                 break
             except requests.exceptions.RequestException as e:
@@ -114,7 +132,7 @@ async def download_file(update: Update, url: str):
                     raise e
 
         if not is_downloading:
-            if os.path.exists(filename):
+            if filename and os.path.exists(filename):
                 os.remove(filename)
             await pinned_msg.edit_text("⚠️ Download canceled mid-way.")
             return
@@ -126,24 +144,18 @@ async def download_file(update: Update, url: str):
             stats["size"] += file_size
             stats["total_speed"] += (file_size/1024/1024)/max(time.time()-start_time,0.1)
 
-        # Upload file
-        await pinned_msg.edit_text("⬆️ Uploading file...")
-        with open(filename, "rb") as f:
-            await update.message.reply_document(
-                document=f,
-                filename=os.path.basename(filename)
-            )
+        # Upload file with progress
+        await upload_file_with_progress(update, filename, filename)
         os.remove(filename)
-        await pinned_msg.edit_text(f"🎉 Upload complete: {filename}")
 
     except Exception as e:
         await pinned_msg.edit_text(f"❌ Error: {e}")
-        if os.path.exists(filename):
+        if filename and os.path.exists(filename):
             os.remove(filename)
     finally:
         is_downloading = False
 
-# === Queue Processor (non-blocking) ===
+# === Queue Processor ===
 async def process_queue(update: Update):
     global is_downloading
     while queue:
@@ -161,6 +173,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 *Downloader Bot — v{BOT_VERSION} Commands*\n\n"
         "/add <link> — Add link to queue\n"
         "/s or /startqueue — Start download queue\n"
+        "/batch — Interactive single link download\n"
         "/list — Show queued links\n"
         "/clear — Clear queue\n"
         "/status — Show current task\n"
@@ -236,6 +249,20 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     minutes, seconds = divmod(remainder,60)
     await update.message.reply_text(f"💓 Bot uptime: {hours}h {minutes}m {seconds}s")
 
+# === /batch command ===
+async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global batch_waiting_for_link
+    batch_waiting_for_link = True
+    await update.message.reply_text("📥 Send the link you want to download immediately:")
+
+async def handle_batch_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global batch_waiting_for_link
+    if batch_waiting_for_link:
+        link = update.message.text.strip()
+        batch_waiting_for_link = False
+        await update.message.reply_text(f"⏳ Starting immediate download for:\n{link}")
+        await download_file(update, link)
+
 # === Main ===
 def main():
     Thread(target=run_flask).start()  # Start Flask server
@@ -253,6 +280,8 @@ def main():
     app_bot.add_handler(CommandHandler("stats", stats_command))
     app_bot.add_handler(CommandHandler("rename", rename))
     app_bot.add_handler(CommandHandler("ping", ping))
+    app_bot.add_handler(CommandHandler("batch", batch))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_batch_link))
 
     print(f"🤖 Bot v{BOT_VERSION} started successfully! Waiting for commands...")
     app_bot.run_polling()
