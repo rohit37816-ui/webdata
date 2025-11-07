@@ -13,7 +13,7 @@ from threading import Thread
 from datetime import datetime
 
 # === BOT Version ===
-BOT_VERSION = "0.3"
+BOT_VERSION = "0.5"
 
 # === Load BOT TOKEN from Environment ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -39,17 +39,24 @@ stats = {"files":0, "size":0, "total_speed":0}
 current_task = None
 start_time_bot = datetime.utcnow()
 
-# === Progress bar animation helper ===
+# === Spinner for animation ===
+spinner_frames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+spinner_index = 0
+
+# === Progress bar helper ===
 def make_progress_bar(percent, length=20):
     filled_length = int(length * percent / 100)
     bar = '█' * filled_length + '░' * (length - filled_length)
     return bar
 
 async def update_progress_message(message, prefix, done_mb, total_mb, speed, eta):
+    global spinner_index
     percent = (done_mb/total_mb)*100 if total_mb > 0 else 0
     bar = make_progress_bar(percent)
+    spinner = spinner_frames[spinner_index % len(spinner_frames)]
+    spinner_index += 1
     text = (
-        f"{prefix} {percent:.2f}%\n"
+        f"{spinner} {prefix} {percent:.2f}%\n"
         f"[{bar}]\n"
         f"📥 {done_mb:.2f} MB / {total_mb:.2f} MB\n"
         f"⚡ Speed: {speed:.2f} MB/s\n"
@@ -59,38 +66,33 @@ async def update_progress_message(message, prefix, done_mb, total_mb, speed, eta
 
 # === Extract file title ===
 def extract_title(url):
-    # 1️⃣ Try query parameter "title"
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
     if "title" in query:
         return unquote(query["title"][0]).replace("|","-").replace(" ","_")
-    
-    # 2️⃣ Fallback to filename from path
     filename = os.path.basename(parsed.path)
     if filename:
         return unquote(filename)
-    
-    # 3️⃣ Default fallback
     return "file"
 
-# === Download and Upload function with auto-title ===
+# === Download and Upload function ===
 async def download_and_upload(update: Update, url):
     global is_downloading, stats, current_task, rename_next_file
     current_task = url
     is_downloading = True
 
     try:
-        # Extract filename automatically
+        # Get filename
         filename = extract_title(url)
+        ext = filename.split(".")[-1] if "." in filename else "mp4"
         if rename_next_file:
-            ext = filename.split('.')[-1] if '.' in filename else 'mp4'
             filename = f"{rename_next_file}.{ext}"
             rename_next_file = None
 
-        progress_msg = await update.message.reply_text(f"🚀 Starting: {filename}")
+        pinned_msg = await update.message.reply_text(f"🚀 Starting download: {filename}")
         start_time = time.time()
 
-        # --- YouTube or streaming ---
+        # --- Download ---
         if "youtube.com" in url or "youtu.be" in url:
             ydl_opts = {'format': 'best', 'outtmpl': f'{filename}.%(ext)s'}
             loop = asyncio.get_event_loop()
@@ -98,10 +100,8 @@ async def download_and_upload(update: Update, url):
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
             await loop.run_in_executor(None, run_yt_dlp)
-            # Get actual downloaded file name
             filename = f"{filename}.mp4" if not os.path.exists(filename) else filename
 
-        # --- Direct download ---
         else:
             headers = {"User-Agent": "Mozilla/5.0"}
             with requests.get(url, headers=headers, stream=True, timeout=(10, None)) as r:
@@ -121,39 +121,39 @@ async def download_and_upload(update: Update, url):
                             if time.time()-last_update_time>0.5:
                                 speed = downloaded/(1024*1024)/elapsed
                                 eta = (total_length-downloaded)/(1024*1024)/max(speed,0.001)
-                                await update_progress_message(progress_msg, "⬇️ Downloading", downloaded/(1024*1024), total_length/(1024*1024), speed, eta)
+                                await update_progress_message(pinned_msg, "⬇️ Downloading", downloaded/(1024*1024), total_length/(1024*1024), speed, eta)
                                 last_update_time = time.time()
                         await asyncio.sleep(random.uniform(0.05,0.1))
 
-        # Update stats
+        # --- Update stats ---
         if os.path.exists(filename):
             file_size = os.path.getsize(filename)
             stats["files"] += 1
             stats["size"] += file_size
             stats["total_speed"] += (file_size/1024/1024)/max(time.time()-start_time,0.1)
 
-        # Upload progress
-        uploaded = 0
-        total_size = os.path.getsize(filename)
-        chunk_size = 1024*1024*5
+        # --- Upload ---
         upload_start = time.time()
-
-        with open(filename,'rb') as f:
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
+        total_size = os.path.getsize(filename)
+        uploaded = 0
+        chunk_size = 1024*1024*5
+        while True:
+            with open(filename,'rb') as f:
+                data = f.read()
+                if not data:
                     break
-                uploaded += len(chunk)
+                uploaded += len(data)
                 elapsed = max(time.time()-upload_start,0.1)
                 speed = uploaded/(1024*1024)/elapsed
                 eta = (total_size-uploaded)/(1024*1024)/max(speed,0.001)
-                await update_progress_message(progress_msg, "⬆️ Uploading", uploaded/(1024*1024), total_size/(1024*1024), speed, eta)
-                await asyncio.sleep(0.1)
+                await update_progress_message(pinned_msg, "⬆️ Uploading", uploaded/(1024*1024), total_size/(1024*1024), speed, eta)
+                break
 
-        # Send file
+        # Send the actual file
         with open(filename,'rb') as f:
             await update.message.reply_document(document=f, filename=filename)
-        await progress_msg.delete()
+
+        await pinned_msg.delete()
         os.remove(filename)
 
     except Exception as e:
